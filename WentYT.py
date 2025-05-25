@@ -1,234 +1,253 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox
-from tkinter import ttk
+import customtkinter as ctk
+import tkinter.messagebox as messagebox
+import tkinter.filedialog as filedialog
 import subprocess
 import threading
 import os
 import shutil
 import sys
 import re
+import datetime
 
-# Маппинг русской раскладки на английскую
-rus = "йцукенгшщзхъфывапролджэячсмитьбю"
-eng = "qwertyuiop[]asdfghjkl;'zxcvbnm,."
-rus += rus.upper()
-eng += eng.upper()
-RU_EN_LAYOUT = str.maketrans(rus, eng)
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+
+
+RUS_TO_ENG = str.maketrans(
+    "йцукенгшщзхъфывапролджэячсмитьбюЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ",
+    "qwertyuiop[]asdfghjkl;'zxcvbnm,.QWERTYUIOP[]ASDFGHJKL;'ZXCVBNM,.",
+)
 
 
 def fix_layout(text):
-    return text.translate(RU_EN_LAYOUT)
+    """Convert Russian keyboard input to English."""
+    return text.translate(RUS_TO_ENG)
 
 
-def ensure_yt_dlp():
+def check_yt_dlp():
+    """Check if yt-dlp and ffmpeg are installed; prompt to install if missing."""
     if shutil.which("yt-dlp") is None:
-        install = messagebox.askyesno(
-            "Установка yt-dlp", "yt-dlp не найден. Установить автоматически через pip?"
+        if messagebox.askyesno("Install yt-dlp", "yt-dlp not found. Install via pip?"):
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "yt-dlp"]
+                )
+                messagebox.showinfo("Success", "yt-dlp installed successfully.")
+            except subprocess.CalledProcessError as e:
+                messagebox.showerror("Error", f"Failed to install yt-dlp: {e}")
+                return False
+        return False
+    if shutil.which("ffmpeg") is None:
+        messagebox.showerror(
+            "Error", "ffmpeg not found. Please install ffmpeg for MP3 conversion."
         )
-        if not install:
-            return False
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp"])
-            messagebox.showinfo("Успех", "yt-dlp успешно установлен.")
-            return True
-        except subprocess.CalledProcessError as e:
-            messagebox.showerror("Ошибка", f"Не удалось установить yt-dlp:\n{e}")
-            return False
+        return False
     return True
 
 
 def download_playlist():
-    raw_url = url_entry.get().strip()
-    url = fix_layout(raw_url)
+    """Start downloading the YouTube playlist as MP3s."""
+    url = url_entry.get().strip()
     out_dir = dir_entry.get().strip()
-    if not url or url == "Введите URL плейлиста":
-        messagebox.showerror("Ошибка", "Пожалуйста, введите URL плейлиста")
+
+    if not url or url == "Enter playlist URL":
+        messagebox.showerror("Error", "Please enter a valid playlist URL.")
         return
-    if not out_dir or out_dir == "Выберите директорию":
-        messagebox.showerror("Ошибка", "Пожалуйста, выберите директорию для сохранения")
+    if not out_dir or out_dir == "Select directory":
+        messagebox.showerror("Error", "Please select a directory to save files.")
+        return
+    if not os.path.isdir(out_dir):
+        messagebox.showerror("Error", "Selected directory does not exist.")
         return
 
-    if not ensure_yt_dlp():
+    url = fix_layout(url)
+    if not check_yt_dlp():
         return
 
-    listbox.delete(0, tk.END)
-    progress["value"] = 0
-    download_button.config(state=tk.DISABLED)
+    output_text.configure(state="normal")
+    output_text.delete("1.0", ctk.END)
+    output_text.configure(state="disabled")
+    progress_bar.set(0)
+    status_label.configure(text="Starting download...")
+    download_button.configure(state="disabled")
 
     def run_download():
+        """Run yt-dlp in a separate thread."""
         cmd = [
             "yt-dlp",
             "-x",
             "--audio-format",
             "mp3",
             "--yes-playlist",
+            "--verbose",
             url,
             "-o",
-            os.path.join(out_dir, "%(playlist_title)s", "%(title)s.%(ext)s"),
+            os.path.join(out_dir, "%(playlist_title)s/%(title)s.%(ext)s"),
         ]
         download_count = 0
+        error_output = []
         try:
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
             )
             for line in process.stdout:
-                prog = re.search(r"(\d+\.?\d*)%", line)
-                if prog:
-                    progress["value"] = float(prog.group(1))
+                prog_match = re.search(r"(\d+\.?\d*)%", line)
+                if prog_match:
+                    progress_bar.set(float(prog_match.group(1)) / 100)
+                    status_label.configure(text=f"Progress: {prog_match.group(1)}%")
 
-                dest = re.search(r"Destination: (?P<path>.+?\.mp3)", line)
-                if dest:
-                    full_path = dest.group("path").strip()
-                    filename = os.path.basename(full_path)
+                dest_match = re.search(r"Destination: (?P<path>.+?\.mp3)", line)
+                if dest_match:
+                    filename = os.path.basename(dest_match.group("path").strip())
                     name_only = os.path.splitext(filename)[0]
-                    listbox.insert(tk.END, f'"{name_only}" скачано!')
+                    output_text.configure(state="normal")
+                    output_text.insert(ctk.END, f'"{name_only}" downloaded!\n')
+                    output_text.configure(state="disabled")
+                    output_text.see(ctk.END)
                     download_count += 1
+                    root.update_idletasks()
+                else:
+                    error_output.append(line.strip())
 
             process.wait()
             if process.returncode == 0:
-                listbox.insert(tk.END, f"Готово! Всего скачано: {download_count}")
-                messagebox.showinfo(
-                    "Успех", f"Загрузка завершена! Скачано {download_count} треков."
+                output_text.configure(state="normal")
+                output_text.insert(
+                    ctk.END, f"Done! Total downloaded: {download_count}\n"
                 )
+                output_text.configure(state="disabled")
+                status_label.configure(text=f"Completed: {download_count} tracks")
+                messagebox.showinfo("Success", f"Downloaded {download_count} tracks!")
             else:
-                messagebox.showerror(
-                    "Ошибка",
-                    f"Загрузка завершилась с ошибкой (код {process.returncode})",
+                output_text.configure(state="normal")
+                output_text.insert(
+                    ctk.END, f"Error: Download failed (code {process.returncode})\n"
                 )
+                output_text.insert(ctk.END, "\n".join(error_output[-5:]) + "\n")
+                output_text.configure(state="disabled")
+                status_label.configure(text="Download failed")
+                messagebox.showerror(
+                    "Error",
+                    f"Download failed (code {process.returncode}). Check output for details.",
+                )
+                with open("yt_dlp_error.log", "a", encoding="utf-8") as log_file:
+                    log_file.write(
+                        f"[{datetime.datetime.now()}] Error (code {process.returncode}):\n"
+                    )
+                    log_file.write("\n".join(error_output) + "\n\n")
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Произошла ошибка: {e}")
+            output_text.configure(state="normal")
+            output_text.insert(ctk.END, f"Unexpected error: {e}\n")
+            output_text.configure(state="disabled")
+            status_label.configure(text="Error occurred")
+            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
+            with open("yt_dlp_error.log", "a", encoding="utf-8") as log_file:
+                log_file.write(f"[{datetime.datetime.now()}] Unexpected error: {e}\n\n")
         finally:
-            download_button.config(state=tk.NORMAL)
+            download_button.configure(state="normal")
+            status_label.configure(text="Ready")
 
     threading.Thread(target=run_download, daemon=True).start()
 
 
 def choose_directory():
+    """Open a dialog to select the output directory."""
     directory = filedialog.askdirectory()
     if directory:
-        dir_entry.delete(0, tk.END)
+        dir_entry.delete(0, ctk.END)
         dir_entry.insert(0, directory)
 
 
-# Функции для placeholder'ов
-def on_entry_focus_in(event, entry, placeholder):
+def on_entry_focus_in(entry, placeholder):
+    """Clear placeholder text when entry is focused."""
     if entry.get() == placeholder:
-        entry.delete(0, tk.END)
-        entry.config(foreground="#333")
+        entry.delete(0, ctk.END)
+        entry.configure(text_color="#FFFFFF")
 
 
-def on_entry_focus_out(event, entry, placeholder):
+def on_entry_focus_out(entry, placeholder):
+    """Restore placeholder text if entry is empty."""
     if not entry.get():
         entry.insert(0, placeholder)
-        entry.config(foreground="#999")
+        entry.configure(text_color="#FFFFFF")
 
 
-# Основное окно
-root = tk.Tk()
+def toggle_theme():
+    """Toggle between light and dark modes."""
+    current_mode = ctk.get_appearance_mode()
+    new_mode = "Dark" if current_mode == "Light" else "Light"
+    ctk.set_appearance_mode(new_mode)
+    theme_button.configure(text=f"Switch to {current_mode} Mode")
+
+
+root = ctk.CTk()
 root.title("YouTube Music Downloader")
 root.geometry("600x500")
-root.configure(bg="#f5f5f5")
 root.resizable(False, False)
 
-# Стиль
-style = ttk.Style()
-style.theme_use("clam")
 
-# Настройка стилей
-style.configure("TLabel", font=("Arial", 14), foreground="#333", background="#f5f5f5")
-style.configure("TEntry", font=("Arial", 12), padding=10, relief="flat")
-style.configure(
-    "TButton",
-    font=("Arial", 14, "bold"),
-    padding=10,
-    background="#2196f3",
-    foreground="#ffffff",
-)
-style.configure(
-    "TProgressbar", thickness=20, troughcolor="#e0e0e0", background="#1e90ff"
-)
+input_frame = ctk.CTkFrame(root, corner_radius=10)
+input_frame.pack(pady=20, padx=20, fill="x")
 
-# Эффекты наведения для кнопок
-style.map(
-    "TButton",
-    background=[("active", "#1e90ff"), ("!active", "#2196f3")],
-    foreground=[("active", "#ffffff"), ("!active", "#ffffff")],
-)
 
-# Панель ввода
-frame_top = tk.Frame(
-    root,
-    bg="#ffffff",
-    relief="flat",
-    bd=1,
-    highlightbackground="#e0e0e0",
-    highlightcolor="#e0e0e0",
-    highlightthickness=1,
+url_label = ctk.CTkLabel(input_frame, text="Playlist URL", font=("Arial", 14))
+url_label.grid(row=0, column=0, sticky="w", padx=10, pady=5)
+url_entry = ctk.CTkEntry(input_frame, font=("Arial", 12), width=300)
+url_entry.insert(0, "Enter playlist URL")
+url_entry.configure(text_color="#FFFFFF")
+url_entry.bind(
+    "<FocusIn>", lambda e: on_entry_focus_in(url_entry, "Enter playlist URL")
 )
-frame_top.pack(pady=20, padx=20, fill=tk.X)
-
-url_label = ttk.Label(frame_top, text="URL плейлиста")
-url_label.grid(row=0, column=0, sticky="w", pady=5, padx=10)
-url_entry = ttk.Entry(frame_top)
+url_entry.bind(
+    "<FocusOut>", lambda e: on_entry_focus_out(url_entry, "Enter playlist URL")
+)
 url_entry.grid(row=0, column=1, padx=10, pady=5, sticky="we")
-url_entry.insert(0, "Введите URL плейлиста")
-url_entry.config(foreground="#999")
-url_entry.bind(
-    "<FocusIn>", lambda e: on_entry_focus_in(e, url_entry, "Введите URL плейлиста")
-)
-url_entry.bind(
-    "<FocusOut>", lambda e: on_entry_focus_out(e, url_entry, "Введите URL плейлиста")
-)
-frame_top.columnconfigure(1, weight=1)
 
-dir_label = ttk.Label(frame_top, text="Папка для сохранения")
-dir_label.grid(row=1, column=0, sticky="w", pady=5, padx=10)
-dir_entry = ttk.Entry(frame_top)
+dir_label = ctk.CTkLabel(input_frame, text="Save Directory", font=("Arial", 14))
+dir_label.grid(row=1, column=0, sticky="w", padx=10, pady=5)
+dir_entry = ctk.CTkEntry(input_frame, font=("Arial", 12), width=300)
+dir_entry.insert(0, "Select directory")
+dir_entry.configure(text_color="#FFFFFF")
+dir_entry.bind("<FocusIn>", lambda e: on_entry_focus_in(dir_entry, "Select directory"))
+dir_entry.bind(
+    "<FocusOut>", lambda e: on_entry_focus_out(dir_entry, "Select directory")
+)
 dir_entry.grid(row=1, column=1, padx=10, pady=5, sticky="we")
-dir_entry.insert(0, "Выберите директорию")
-dir_entry.config(foreground="#999")
-dir_entry.bind(
-    "<FocusIn>", lambda e: on_entry_focus_in(e, dir_entry, "Выберите директорию")
-)
-dir_entry.bind(
-    "<FocusOut>", lambda e: on_entry_focus_out(e, dir_entry, "Выберите директорию")
-)
-
-dir_button = ttk.Button(
-    frame_top, text="📁 Выбрать", compound=tk.LEFT, command=choose_directory
+dir_button = ctk.CTkButton(
+    input_frame, text="📁 Select", command=choose_directory, width=100
 )
 dir_button.grid(row=1, column=2, padx=10, pady=5)
+input_frame.columnconfigure(1, weight=1)
 
-# Кнопка загрузки
-download_button = ttk.Button(
-    root, text="⬇️ Скачать плейлист", compound=tk.LEFT, command=download_playlist
+download_button = ctk.CTkButton(
+    root,
+    text="Download Playlist",
+    command=download_playlist,
+    font=("Arial", 14, "bold"),
+    height=40,
 )
 download_button.pack(pady=15)
 
-# Прогрессбар
-progress = ttk.Progressbar(root, orient="horizontal", mode="determinate", length=560)
-progress.pack(padx=20, pady=10)
+progress_bar = ctk.CTkProgressBar(root, width=560, height=20)
+progress_bar.set(0)
+progress_bar.pack(padx=20, pady=10)
+status_label = ctk.CTkLabel(root, text="Ready", font=("Arial", 12))
+status_label.pack(pady=5)
 
-# Мини-консоль
-listbox_frame = tk.Frame(
+output_frame = ctk.CTkFrame(root, corner_radius=10)
+output_frame.pack(fill="both", expand=True, padx=20, pady=10)
+output_text = ctk.CTkTextbox(
+    output_frame, font=("Arial", 12), height=150, wrap="word", state="disabled"
+)
+output_text.pack(fill="both", expand=True, padx=10, pady=10)
+
+theme_button = ctk.CTkButton(
     root,
-    bg="#ffffff",
-    relief="flat",
-    bd=1,
-    highlightbackground="#e0e0e0",
-    highlightcolor="#e0e0e0",
-    highlightthickness=1,
-)
-listbox_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-listbox = tk.Listbox(
-    listbox_frame,
-    height=10,
+    text="Switch to Dark Mode",
+    command=toggle_theme,
     font=("Arial", 12),
-    foreground="#333",
-    background="#ffffff",
-    borderwidth=0,
-    highlightthickness=0,
+    width=150,
 )
-listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+theme_button.pack(pady=10)
 
 root.mainloop()
